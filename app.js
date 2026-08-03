@@ -18,6 +18,22 @@ let playerReady = false;
 let state = { videoId: '', time: 0, duration: 0, playing: false, updatedAt: Date.now() };
 let suppressBroadcastUntil = 0;
 let seekingLocally = false;
+let activeRoomCode = '';
+let reconnectTimer = null;
+let peerReconnectTimer = null;
+let lastPeerMessageAt = 0;
+let intentionalClose = false;
+
+const PEER_OPTIONS = {
+  debug: 1,
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' }
+    ]
+  }
+};
 
 function randomRoom() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -101,18 +117,62 @@ function applyRemoteState(remote, action = 'sync') {
   updatePlayButton();
 }
 
-function attachConnection(connection) {
-  conn = connection;
-  conn.on('open', () => {
-    setBadge('online', 'Вдвоём');
-    if (isHost) {
-      broadcast({ kind: 'hello', state: { ...state } });
-    } else {
-      broadcast({ kind: 'request-state' });
+function clearReconnectTimers() {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (peerReconnectTimer) clearTimeout(peerReconnectTimer);
+  reconnectTimer = null;
+  peerReconnectTimer = null;
+}
+
+function scheduleGuestReconnect(delay = 1500) {
+  if (isHost || intentionalClose || !activeRoomCode) return;
+  if (reconnectTimer) return;
+  setBadge('waiting', 'Переподключение…');
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (!peer || peer.destroyed) {
+      startGuestPeer();
+      return;
     }
+    if (peer.disconnected) {
+      try { peer.reconnect(); } catch { startGuestPeer(); return; }
+    }
+    if (!conn?.open) connectToHost();
+  }, delay);
+}
+
+function ensureHostPeerConnected() {
+  if (!isHost || intentionalClose || !peer || peer.destroyed || !peer.disconnected) return;
+  try {
+    setBadge('waiting', 'Восстановление комнаты…');
+    peer.reconnect();
+  } catch {
+    startHostPeer();
+  }
+}
+
+function attachConnection(connection) {
+  if (conn && conn !== connection) {
+    try { conn.close(); } catch {}
+  }
+  conn = connection;
+
+  conn.on('open', () => {
+    clearReconnectTimers();
+    lastPeerMessageAt = Date.now();
+    setBadge('online', 'Вдвоём');
+    if (isHost) broadcast({ kind: 'hello', state: { ...state } });
+    else broadcast({ kind: 'request-state' });
   });
+
   conn.on('data', (message) => {
+    lastPeerMessageAt = Date.now();
     if (!message || typeof message !== 'object') return;
+    if (message.kind === 'ping') {
+      broadcast({ kind: 'pong', sentAt: message.sentAt });
+      return;
+    }
+    if (message.kind === 'pong') return;
     if (message.kind === 'request-state' && isHost) broadcast({ kind: 'hello', state: { ...state } });
     if (message.kind === 'hello') {
       if (!state.videoId && message.state?.videoId) loadPlayer(message.state.videoId);
@@ -120,8 +180,98 @@ function attachConnection(connection) {
     }
     if (message.kind === 'state') applyRemoteState(message.state, message.action);
   });
-  conn.on('close', () => setBadge('offline', 'Отключён'));
-  conn.on('error', () => setBadge('offline', 'Ошибка связи'));
+
+  conn.on('close', () => {
+    if (intentionalClose) return;
+    setBadge('waiting', isHost ? 'Ждём переподключения' : 'Связь прервалась…');
+    if (!isHost) scheduleGuestReconnect(800);
+  });
+
+  conn.on('error', () => {
+    if (intentionalClose) return;
+    setBadge('waiting', 'Восстанавливаем связь…');
+    if (!isHost) scheduleGuestReconnect(1000);
+  });
+}
+
+function configurePeerEvents(instance) {
+  instance.on('disconnected', () => {
+    if (intentionalClose) return;
+    if (isHost) {
+      setBadge('waiting', 'Восстановление комнаты…');
+      if (!peerReconnectTimer) {
+        peerReconnectTimer = setTimeout(() => {
+          peerReconnectTimer = null;
+          ensureHostPeerConnected();
+        }, 1000);
+      }
+    } else {
+      scheduleGuestReconnect(1000);
+    }
+  });
+
+  instance.on('close', () => {
+    if (intentionalClose) return;
+    setBadge('waiting', 'Перезапуск соединения…');
+    if (isHost) setTimeout(startHostPeer, 1200);
+    else scheduleGuestReconnect(1200);
+  });
+}
+
+function startHostPeer() {
+  if (!activeRoomCode || intentionalClose) return;
+  try { if (peer && !peer.destroyed) peer.destroy(); } catch {}
+  peer = new Peer(activeRoomCode.toLowerCase(), PEER_OPTIONS);
+  configurePeerEvents(peer);
+  peer.on('open', () => {
+    setBadge(conn?.open ? 'online' : 'waiting', conn?.open ? 'Вдвоём' : 'Ждём второго');
+  });
+  peer.on('connection', (connection) => attachConnection(connection));
+  peer.on('error', (error) => {
+    if (intentionalClose) return;
+    if (error.type === 'unavailable-id') {
+      setBadge('waiting', 'Возвращаем комнату…');
+      setTimeout(startHostPeer, 1800);
+    } else if (error.type === 'network' || error.type === 'server-error' || error.type === 'socket-error') {
+      setBadge('waiting', 'Восстановление комнаты…');
+      setTimeout(ensureHostPeerConnected, 1200);
+    } else {
+      setBadge('offline', 'Ошибка комнаты');
+    }
+  });
+}
+
+function connectToHost() {
+  if (isHost || intentionalClose || !peer?.open || conn?.open) return;
+  const connection = peer.connect(activeRoomCode.toLowerCase(), { reliable: true, serialization: 'json' });
+  attachConnection(connection);
+  setTimeout(() => {
+    if (!connection.open && conn === connection) {
+      try { connection.close(); } catch {}
+      scheduleGuestReconnect(1200);
+    }
+  }, 8000);
+}
+
+function startGuestPeer() {
+  if (isHost || intentionalClose || !activeRoomCode) return;
+  try { if (peer && !peer.destroyed) peer.destroy(); } catch {}
+  peer = new Peer(undefined, PEER_OPTIONS);
+  configurePeerEvents(peer);
+  peer.on('open', connectToHost);
+  peer.on('error', (error) => {
+    if (intentionalClose) return;
+    if (error.type === 'peer-unavailable') {
+      setBadge('waiting', 'Хозяин переподключается…');
+      scheduleGuestReconnect(1800);
+    } else if (error.type === 'network' || error.type === 'server-error' || error.type === 'socket-error') {
+      setBadge('waiting', 'Восстанавливаем связь…');
+      scheduleGuestReconnect(1500);
+    } else {
+      setBadge('offline', 'Ошибка подключения');
+      scheduleGuestReconnect(2500);
+    }
+  });
 }
 
 function createRoom() {
@@ -137,17 +287,8 @@ function createRoom() {
   els.inviteLink.value = invite;
   setBadge('waiting', 'Ждём второго');
 
-  peer = new Peer(roomCode.toLowerCase());
-  peer.on('open', () => {});
-  peer.on('connection', (connection) => {
-    if (conn?.open) connection.close();
-    else attachConnection(connection);
-  });
-  peer.on('error', (error) => {
-    if (error.type === 'unavailable-id') {
-      location.reload();
-    } else setBadge('offline', 'Ошибка комнаты');
-  });
+  activeRoomCode = roomCode;
+  startHostPeer();
 }
 
 function joinRoom(roomCode, videoId = '') {
@@ -160,9 +301,8 @@ function joinRoom(roomCode, videoId = '') {
   if (videoId) loadPlayer(videoId);
   setBadge('waiting', 'Подключение…');
 
-  peer = new Peer();
-  peer.on('open', () => attachConnection(peer.connect(clean.toLowerCase(), { reliable: true })));
-  peer.on('error', () => setBadge('offline', 'Комната не найдена'));
+  activeRoomCode = clean;
+  startGuestPeer();
 }
 
 function formatTime(seconds) {
@@ -248,8 +388,34 @@ window.addEventListener('message', (event) => {
 });
 
 setInterval(() => {
-  if (isHost && conn?.open && state.playing) broadcastState('heartbeat');
+  if (conn?.open) {
+    broadcast({ kind: 'ping', sentAt: Date.now() });
+    if (isHost && state.playing) broadcastState('heartbeat');
+  } else if (!isHost && activeRoomCode) {
+    scheduleGuestReconnect(500);
+  } else if (isHost) {
+    ensureHostPeerConnected();
+  }
 }, 5000);
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (isHost) ensureHostPeerConnected();
+  else if (!conn?.open) scheduleGuestReconnect(200);
+  else broadcast({ kind: 'request-state' });
+});
+
+window.addEventListener('online', () => {
+  if (isHost) ensureHostPeerConnected();
+  else scheduleGuestReconnect(200);
+});
+
+window.addEventListener('beforeunload', () => {
+  intentionalClose = true;
+  clearReconnectTimers();
+  try { conn?.close(); } catch {}
+  try { peer?.destroy(); } catch {}
+});
 
 (function bootFromHash() {
   const params = new URLSearchParams(location.hash.replace(/^#/, ''));
