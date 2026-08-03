@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#111318" />
+  <title>RUTUBE Вместе</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script defer src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div class="logo">RUTUBE <span>ВМЕСТЕ</span></div>
+      <p>Синхронный просмотр на двух телефонах</p>
+    </header>
+
+    <section id="setup" class="card">
+      <label for="videoUrl">Ссылка на видео Rutube</label>
+      <input id="videoUrl" type="url" inputmode="url" placeholder="https://rutube.ru/video/..." autocomplete="off" />
+      <button id="createBtn" class="primary">Создать комнату</button>
+      <div class="divider"><span>или</span></div>
+      <label for="roomCode">Код комнаты</label>
+      <input id="roomCode" type="text" inputmode="latin" placeholder="Например: KINO-7F3A" autocomplete="off" />
+      <button id="joinBtn">Подключиться</button>
+      <p id="setupError" class="error" role="alert"></p>
+    </section>
+
+    <section id="room" class="hidden">
+      <div class="status-row card compact">
+        <div>
+          <small>Комната</small>
+          <strong id="roomLabel">—</strong>
+        </div>
+        <span id="connectionBadge" class="badge waiting">Ожидание</span>
+      </div>
+
+      <div id="shareCard" class="card">
+        <p>Отправь эту ссылку второму человеку:</p>
+        <div class="share-row">
+          <input id="inviteLink" readonly />
+          <button id="copyBtn">Копировать</button>
+        </div>
+        <button id="shareBtn" class="secondary">Поделиться</button>
+      </div>
+
+      <div class="player-shell">
+        <div class="ratio">
+          <iframe id="rutubePlayer" title="Rutube player" allow="clipboard-write; autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>
+        </div>
+      </div>
+
+      <div class="controls card">
+        <button id="backBtn" aria-label="Назад на 10 секунд">−10</button>
+        <button id="playPauseBtn" class="primary round" aria-label="Воспроизвести или поставить на паузу">▶</button>
+        <button id="forwardBtn" aria-label="Вперёд на 10 секунд">+10</button>
+      </div>
+
+      <div class="timeline card compact">
+        <span id="currentTime">0:00</span>
+        <input id="seek" type="range" min="0" max="100" value="0" step="0.1" aria-label="Перемотка" />
+        <span id="duration">0:00</span>
+      </div>
+
+      <div class="card tips">
+        <strong id="roleText"></strong>
+        <p>Перед началом оба один раз нажмите большую кнопку ▶ — мобильный браузер может требовать первое касание для запуска звука.</p>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
